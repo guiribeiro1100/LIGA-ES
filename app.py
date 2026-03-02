@@ -47,10 +47,10 @@ RAMAL_PARA_NOME = {
     "30": "Isadora",
     "33": "Cleber",
     "31": "Daniel",
+    "34": "Daniel",
     "32": "Natália",
     "40": "Guilherme",
 }
-
 required = [COL_ORIGEM, COL_TELEFONE, COL_DATA]
 missing = [c for c in required if c not in df.columns]
 if missing:

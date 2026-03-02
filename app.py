@@ -106,7 +106,8 @@ if COL_ESTADO in df.columns:
 # =========================
 st.sidebar.header("👤 Ramal (Origem)")
 
-ramais = sorted([r for r in df[COL_ORIGEM].dropna().astype(str).unique().tolist() if r.strip() != ""])
+ramais_dados = df[COL_ORIGEM].dropna().astype(str).unique().tolist()
+ramais = sorted(set(list(RAMAL_PARA_NOME.keys()) + ramais_dados))
 if not ramais:
     st.error("Não encontrei valores na coluna Origem após os filtros.")
     st.stop()

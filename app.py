@@ -37,10 +37,19 @@ else:
 # =========================
 # COLUNAS (da sua planilha)
 # =========================
-COL_ORIGEM = "Origem"
-COL_TELEFONE = "Destino"
-COL_DATA = "Data"
-COL_ESTADO = "Estado"  # opcional
+COL_ORIGEM = "Origem"   # ramal
+COL_TELEFONE = "Destino"  # número discado
+COL_DATA = "Data"       # data/hora
+COL_ESTADO = "Estado"   # opcional
+
+RAMAL_PARA_NOME = {
+    "41": "Gabriela",
+    "30": "Isadora",
+    "33": "Cleber",
+    "31": "Daniel",
+    "32": "Natália",
+    "40": "Guilherme",
+}
 
 required = [COL_ORIGEM, COL_TELEFONE, COL_DATA]
 missing = [c for c in required if c not in df.columns]
@@ -56,11 +65,8 @@ df[COL_TELEFONE] = df[COL_TELEFONE].astype(str).str.replace(r"\D+", "", regex=Tr
 df[COL_DATA] = pd.to_datetime(df[COL_DATA], errors="coerce", dayfirst=True)
 df = df[df[COL_DATA].notna()].copy()
 
-# Coluna de data (somente dia) para agregações
+# Coluna de dia para agregações
 df["_dia"] = df[COL_DATA].dt.date
-
-# Telefones válidos (ajustável)
-MIN_DIGITS_DEFAULT = 8
 
 # =========================
 # SIDEBAR: FILTROS
@@ -82,29 +88,38 @@ if isinstance(date_range, tuple) and len(date_range) == 2:
 else:
     df = df[df[COL_DATA].dt.date == date_range]
 
-min_digits = st.sidebar.number_input("📞 Mínimo de dígitos do Destino", min_value=6, max_value=15, value=MIN_DIGITS_DEFAULT, step=1)
+# Telefones válidos
+st.sidebar.subheader("📞 Validação de telefone")
+min_digits = st.sidebar.number_input("Mínimo de dígitos do Destino", min_value=6, max_value=15, value=8, step=1)
 df = df[df[COL_TELEFONE].str.len() >= int(min_digits)].copy()
 
-# Filtro por estado (se tiver)
+# Filtro por estado (se existir)
 if COL_ESTADO in df.columns:
     st.sidebar.subheader("☎️ Estado (opcional)")
     estados = sorted([e for e in df[COL_ESTADO].dropna().astype(str).unique().tolist() if e.strip() != ""])
-    default_estados = estados  # por padrão, tudo
-    selected_estados = st.sidebar.multiselect("Selecione estados", options=estados, default=default_estados)
+    selected_estados = st.sidebar.multiselect("Selecione estados", options=estados, default=estados)
     if selected_estados:
         df = df[df[COL_ESTADO].astype(str).isin(selected_estados)]
 
 # =========================
 # MEU RAMAL + META
 # =========================
-st.sidebar.header("👤 Meu Ramal")
+st.sidebar.header("👤 Ramal (Origem)")
+
 ramais = sorted([r for r in df[COL_ORIGEM].dropna().astype(str).unique().tolist() if r.strip() != ""])
 if not ramais:
     st.error("Não encontrei valores na coluna Origem após os filtros.")
     st.stop()
 
-meu_ramal = st.sidebar.selectbox("Escolha seu ramal (Origem)", options=ramais, index=0)
-meu_nome = st.sidebar.text_input("Nome para exibir", value="Guilherme")
+opcoes = []
+for r in ramais:
+    nome = RAMAL_PARA_NOME.get(str(r), "Sem nome")
+    opcoes.append(f"{r} - {nome}")
+
+selecionado = st.sidebar.selectbox("Escolha o ramal", options=opcoes)
+meu_ramal = selecionado.split(" - ")[0].strip()
+nome_auto = RAMAL_PARA_NOME.get(meu_ramal, "Sem nome")
+meu_nome = st.sidebar.text_input("Nome para exibir", value=nome_auto)
 
 st.sidebar.header("🎯 Metas")
 meta_diaria = st.sidebar.number_input("Meta diária (números únicos)", min_value=0, value=30, step=5)
@@ -112,7 +127,7 @@ meta_periodo = st.sidebar.number_input("Meta do período (números únicos)", mi
 st.sidebar.caption("Se meta do período = 0, o painel calcula automaticamente: meta_diaria × dias no período.")
 
 # =========================
-# RESUMOS
+# RESUMO GERAL
 # =========================
 st.subheader("📌 Visão Geral (período filtrado)")
 
@@ -134,22 +149,23 @@ meu_unicos = df_meu[COL_TELEFONE].nunique()
 meu_total = len(df_meu)
 meu_repetidos = max(0, meu_total - meu_unicos)
 
-st.subheader("✅ Seu Resultado (Origem = seu ramal)")
+st.subheader("✅ Resultado do ramal selecionado")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric(f"{meu_nome} ({meu_ramal}) - únicos", meu_unicos)
 c2.metric("Total de ligações", meu_total)
 c3.metric("Repetições ignoradas", meu_repetidos)
+c4.metric("Meta do período", meta_periodo_calc)
 
 progress = 0 if meta_periodo_calc == 0 else min(1.0, meu_unicos / meta_periodo_calc)
-c4.metric("Meta do período", meta_periodo_calc)
 st.progress(progress)
-st.info(f"**{meu_nome} ({meu_ramal}) ligou para {meu_unicos} números únicos** no período selecionado.")
+
+st.success(f"{meu_nome} ({meu_ramal}) ligou para {meu_unicos} números únicos no período selecionado.")
 
 # =========================
-# GRÁFICO: EVOLUÇÃO DIÁRIA (MEU RAMAL)
+# GRÁFICO: EVOLUÇÃO DIÁRIA (RAMAL)
 # =========================
-st.subheader("📈 Evolução diária do seu ramal (números únicos por dia)")
+st.subheader("📈 Evolução diária (números únicos por dia)")
 
 daily_me = (
     df_meu.groupby("_dia")[COL_TELEFONE]
@@ -173,12 +189,15 @@ st.subheader("🏆 Ranking por ramal (números únicos no período)")
 ranking = (
     df.groupby(COL_ORIGEM)
     .agg(
-        ligacoes=("{}".format(COL_TELEFONE), "size"),
-        unicos=("{}".format(COL_TELEFONE), pd.Series.nunique),
+        ligacoes=(COL_TELEFONE, "size"),
+        unicos=(COL_TELEFONE, pd.Series.nunique),
     )
     .reset_index()
 )
+
 ranking["repeticoes"] = ranking["ligacoes"] - ranking["unicos"]
+ranking["Nome"] = ranking[COL_ORIGEM].astype(str).map(RAMAL_PARA_NOME).fillna("Sem nome")
+ranking = ranking[["Nome", COL_ORIGEM, "ligacoes", "unicos", "repeticoes"]]
 ranking = ranking.sort_values("unicos", ascending=False)
 
 st.dataframe(ranking, use_container_width=True, height=320)
@@ -189,13 +208,13 @@ st.dataframe(ranking, use_container_width=True, height=320)
 st.subheader("📊 Top 10 ramais (únicos)")
 
 top10 = ranking.head(10).copy()
-top10 = top10.set_index(COL_ORIGEM)[["unicos"]]
+top10 = top10.set_index("Nome")[["unicos"]]
 st.bar_chart(top10, height=260)
 
 # =========================
-# NÚMEROS MAIS REPETIDOS (MEU RAMAL)
+# NÚMEROS MAIS REPETIDOS (RAMAL)
 # =========================
-st.subheader("🔁 Números mais repetidos do seu ramal")
+st.subheader("🔁 Números mais repetidos do ramal selecionado")
 
 top_rep = (
     df_meu.groupby(COL_TELEFONE)
@@ -205,7 +224,7 @@ top_rep = (
 )
 
 st.dataframe(top_rep.head(200), use_container_width=True, height=320)
-st.caption("Dica: se um número aparece com muitas tentativas, é retrabalho (ligações repetidas).")
+st.caption("Se um número aparece com muitas tentativas, é retrabalho (ligações repetidas).")
 
 # =========================
 # DETALHES (opcional)

@@ -1,24 +1,23 @@
 import streamlit as st
 import pandas as pd
 import io
-import re
 
 st.set_page_config(page_title="Painel Profissional de Ligações", page_icon="📞", layout="wide")
 
 st.title("📞 Painel Profissional de Ligações por Ramal")
-st.caption("Meta diária • Gráficos • Ranking • Telefones únicos (sem duplicar) • Filtro por período")
+st.caption("Ranking • Contatos únicos • Atendidas com mínimo de 2 minutos • Sem filtro por data")
 
 uploaded = st.file_uploader("📤 Envie sua planilha", type=["xlsx", "csv"])
 if not uploaded:
     st.stop()
 
 # =========================
-# LEITURA INTELIGENTE (Excel com cabeçalho na linha certa)
+# LEITURA INTELIGENTE
 # =========================
 if uploaded.name.lower().endswith(".csv"):
-    df = pd.read_csv(uploaded, dtype=str)
+    df = pd.read_csv(uploaded)
 else:
-    tmp = pd.read_excel(uploaded, header=None, dtype=str)
+    tmp = pd.read_excel(uploaded, header=None)
 
     header_row = None
     for i in range(min(40, len(tmp))):
@@ -31,16 +30,16 @@ else:
         st.error("Não encontrei a linha de cabeçalho (precisa ter 'Data' e 'Origem').")
         st.stop()
 
-    df = tmp.iloc[header_row + 1 :].copy()
-    df.columns = tmp.iloc[header_row].astype(str).str.strip()
+    df = pd.read_excel(uploaded, header=header_row)
+    df.columns = df.columns.astype(str).str.strip()
 
 # =========================
-# COLUNAS (da sua planilha)
+# COLUNAS PRINCIPAIS
 # =========================
-COL_ORIGEM = "Origem"   # ramal
-COL_TELEFONE = "Destino"  # número discado
-COL_DATA = "Data"       # data/hora
-COL_ESTADO = "Estado"   # opcional
+COL_ORIGEM = "Origem"
+COL_DESTINO = "Destino"
+COL_ESTADO = "Estado"
+COL_DATA = "Data"  # opcional, só para referência
 
 RAMAL_PARA_NOME = {
     "41": "Gabriela",
@@ -51,66 +50,73 @@ RAMAL_PARA_NOME = {
     "32": "Natália",
     "40": "Guilherme",
 }
-required = [COL_ORIGEM, COL_TELEFONE, COL_DATA]
+
+required = [COL_ORIGEM, COL_DESTINO]
 missing = [c for c in required if c not in df.columns]
 if missing:
-    st.error(f"Faltam colunas: {missing}.")
+    st.error(f"Faltam colunas obrigatórias: {missing}")
     st.stop()
+
+# =========================
+# DETECTAR COLUNA DE DURAÇÃO AUTOMATICAMENTE
+# =========================
+COL_DURACAO = None
+for col in df.columns:
+    nome_col = str(col).strip().lower()
+    if "dura" in nome_col or "tempo" in nome_col or "duration" in nome_col:
+        COL_DURACAO = col
+        break
 
 # =========================
 # NORMALIZAÇÃO
 # =========================
 df[COL_ORIGEM] = df[COL_ORIGEM].astype(str).str.replace(r"\D+", "", regex=True)
-df[COL_TELEFONE] = df[COL_TELEFONE].astype(str).str.replace(r"\D+", "", regex=True)
-df[COL_DATA] = pd.to_datetime(df[COL_DATA], errors="coerce", dayfirst=True)
-df = df[df[COL_DATA].notna()].copy()
+df[COL_DESTINO] = df[COL_DESTINO].astype(str).str.strip()
 
-# Coluna de dia para agregações
-df["_dia"] = df[COL_DATA].dt.date
+# remove destino vazio
+df = df[df[COL_DESTINO].notna() & (df[COL_DESTINO] != "")].copy()
+
+# coluna auxiliar só números para contagem de únicos
+df["_destino_limpo"] = df[COL_DESTINO].astype(str).str.replace(r"\D+", "", regex=True)
+df["_destino_final"] = df["_destino_limpo"].where(df["_destino_limpo"] != "", df[COL_DESTINO].astype(str))
+
+# normaliza duração em segundos
+if COL_DURACAO is not None:
+    df[COL_DURACAO] = (
+        df[COL_DURACAO]
+        .astype(str)
+        .str.replace(r"[^\d]", "", regex=True)
+    )
+    df[COL_DURACAO] = pd.to_numeric(df[COL_DURACAO], errors="coerce").fillna(0)
+else:
+    df["_duracao_segundos"] = 0
+    COL_DURACAO = "_duracao_segundos"
 
 # =========================
-# SIDEBAR: FILTROS
+# SIDEBAR
 # =========================
 st.sidebar.header("⚙️ Filtros")
 
-min_date = df[COL_DATA].min().date()
-max_date = df[COL_DATA].max().date()
-date_range = st.sidebar.date_input(
-    "📅 Período",
-    value=(min_date, max_date),
-    min_value=min_date,
-    max_value=max_date
-)
+st.sidebar.markdown("### 🔎 Conferência")
+st.sidebar.write("Linhas no arquivo:", len(df))
+st.sidebar.write("Coluna de duração encontrada:", COL_DURACAO)
 
-if isinstance(date_range, tuple) and len(date_range) == 2:
-    start_date, end_date = date_range
-    df = df[(df[COL_DATA].dt.date >= start_date) & (df[COL_DATA].dt.date <= end_date)]
-else:
-    df = df[df[COL_DATA].dt.date == date_range]
-
-# Telefones válidos
-st.sidebar.subheader("📞 Validação de telefone")
-min_digits = st.sidebar.number_input("Mínimo de dígitos do Destino", min_value=6, max_value=15, value=8, step=1)
-df = df[df[COL_TELEFONE].str.len() >= int(min_digits)].copy()
-
-# Filtro por estado (se existir)
+# filtro por estado opcional
 if COL_ESTADO in df.columns:
-    st.sidebar.subheader("☎️ Estado (opcional)")
-    estados = sorted([e for e in df[COL_ESTADO].dropna().astype(str).unique().tolist() if e.strip() != ""])
-    selected_estados = st.sidebar.multiselect("Selecione estados", options=estados, default=estados)
-    if selected_estados:
-        df = df[df[COL_ESTADO].astype(str).isin(selected_estados)]
+    filtrar_estado = st.sidebar.checkbox("Filtrar por Estado", value=False)
+    if filtrar_estado:
+        estados = sorted([e for e in df[COL_ESTADO].dropna().astype(str).unique().tolist() if e.strip() != ""])
+        selected_estados = st.sidebar.multiselect("Selecione estados", options=estados, default=estados)
+        if selected_estados:
+            df = df[df[COL_ESTADO].astype(str).isin(selected_estados)]
 
 # =========================
-# MEU RAMAL + META
+# RAMAL
 # =========================
 st.sidebar.header("👤 Ramal (Origem)")
 
 ramais_dados = df[COL_ORIGEM].dropna().astype(str).unique().tolist()
 ramais = sorted(set(list(RAMAL_PARA_NOME.keys()) + ramais_dados))
-if not ramais:
-    st.error("Não encontrei valores na coluna Origem após os filtros.")
-    st.stop()
 
 opcoes = []
 for r in ramais:
@@ -122,116 +128,155 @@ meu_ramal = selecionado.split(" - ")[0].strip()
 nome_auto = RAMAL_PARA_NOME.get(meu_ramal, "Sem nome")
 meu_nome = st.sidebar.text_input("Nome para exibir", value=nome_auto)
 
-st.sidebar.header("🎯 Metas")
-meta_diaria = st.sidebar.number_input("Meta diária (números únicos)", min_value=0, value=30, step=5)
-meta_periodo = st.sidebar.number_input("Meta do período (números únicos)", min_value=0, value=0, step=10)
-st.sidebar.caption("Se meta do período = 0, o painel calcula automaticamente: meta_diaria × dias no período.")
+# =========================
+# FUNÇÕES AUXILIARES
+# =========================
+def contar_atendidas(df_base: pd.DataFrame, col_estado: str, col_duracao: str) -> int:
+    if col_estado not in df_base.columns:
+        return 0
+    estado_upper = df_base[col_estado].astype(str).str.upper().str.strip()
+    return int(((estado_upper == "ATENDIDA") & (df_base[col_duracao] >= 120)).sum())
+
+def contar_nao_atendidas(df_base: pd.DataFrame, col_estado: str) -> int:
+    if col_estado not in df_base.columns:
+        return 0
+    estado_upper = df_base[col_estado].astype(str).str.upper().str.strip()
+    return int(((estado_upper == "NÃO ATENDIDA") | (estado_upper == "NAO ATENDIDA")).sum())
+
+def contar_falhou(df_base: pd.DataFrame, col_estado: str) -> int:
+    if col_estado not in df_base.columns:
+        return 0
+    estado_upper = df_base[col_estado].astype(str).str.upper().str.strip()
+    return int((estado_upper == "FALHOU").sum())
+
+def contar_congestion(df_base: pd.DataFrame, col_estado: str) -> int:
+    if col_estado not in df_base.columns:
+        return 0
+    estado_upper = df_base[col_estado].astype(str).str.upper().str.strip()
+    return int((estado_upper == "CONGESTION").sum())
 
 # =========================
-# RESUMO GERAL
+# VISÃO GERAL
 # =========================
-st.subheader("📌 Visão Geral (período filtrado)")
+st.subheader("📌 Visão Geral (todos os registros)")
 
-dias_no_periodo = df["_dia"].nunique()
-meta_periodo_calc = meta_periodo if meta_periodo > 0 else int(meta_diaria) * int(dias_no_periodo)
+total_ligacoes = len(df)
+ramais_ativos = df[COL_ORIGEM].nunique()
+contatos_unicos_geral = df["_destino_final"].nunique()
 
-colA, colB, colC, colD = st.columns(4)
-colA.metric("Registros (válidos)", len(df))
-colB.metric("Ramais ativos", df[COL_ORIGEM].nunique())
-colC.metric("Números únicos (geral)", df[COL_TELEFONE].nunique())
-colD.metric("Dias no período", dias_no_periodo)
+colA, colB, colC = st.columns(3)
+colA.metric("Registros (total)", int(total_ligacoes))
+colB.metric("Ramais ativos", int(ramais_ativos))
+colC.metric("Contatos únicos (geral)", int(contatos_unicos_geral))
 
 # =========================
-# MEU RAMAL: KPIs
+# MÉTRICAS GERAIS DE ATENDIMENTO
+# =========================
+if COL_ESTADO in df.columns:
+    atendidas = contar_atendidas(df, COL_ESTADO, COL_DURACAO)
+    nao_atendidas = contar_nao_atendidas(df, COL_ESTADO)
+    falhou = contar_falhou(df, COL_ESTADO)
+    congestion = contar_congestion(df, COL_ESTADO)
+    taxa_atendimento = (atendidas / total_ligacoes * 100) if total_ligacoes > 0 else 0
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("📞 Total de ligações", int(total_ligacoes))
+    c2.metric("✅ Atendidas (+2 min)", int(atendidas))
+    c3.metric("❌ Não atendidas", int(nao_atendidas))
+    c4.metric("⚠️ Falhou", int(falhou))
+    c5.metric("📶 Congestionadas", int(congestion))
+    c6.metric("📊 Taxa de atendimento", f"{taxa_atendimento:.1f}%")
+
+# =========================
+# RESULTADO DO RAMAL
 # =========================
 df_meu = df[df[COL_ORIGEM].astype(str) == str(meu_ramal)].copy()
 
-meu_unicos = df_meu[COL_TELEFONE].nunique()
+meu_unicos = df_meu["_destino_final"].nunique()
 meu_total = len(df_meu)
 meu_repetidos = max(0, meu_total - meu_unicos)
 
 st.subheader("✅ Resultado do ramal selecionado")
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric(f"{meu_nome} ({meu_ramal}) - únicos", meu_unicos)
-c2.metric("Total de ligações", meu_total)
-c3.metric("Repetições ignoradas", meu_repetidos)
-c4.metric("Meta do período", meta_periodo_calc)
+c1, c2, c3 = st.columns(3)
+c1.metric(f"{meu_nome} ({meu_ramal}) - contatos únicos", int(meu_unicos))
+c2.metric("Total de ligações", int(meu_total))
+c3.metric("Repetições ignoradas", int(meu_repetidos))
 
-progress = 0 if meta_periodo_calc == 0 else min(1.0, meu_unicos / meta_periodo_calc)
-st.progress(progress)
+if COL_ESTADO in df_meu.columns:
+    atendidas_meu = contar_atendidas(df_meu, COL_ESTADO, COL_DURACAO)
+    nao_atendidas_meu = contar_nao_atendidas(df_meu, COL_ESTADO)
+    falhou_meu = contar_falhou(df_meu, COL_ESTADO)
+    congestion_meu = contar_congestion(df_meu, COL_ESTADO)
+    taxa_atendimento_meu = (atendidas_meu / meu_total * 100) if meu_total > 0 else 0
 
-st.success(f"{meu_nome} ({meu_ramal}) ligou para {meu_unicos} números únicos no período selecionado.")
+    c4, c5, c6, c7, c8 = st.columns(5)
+    c4.metric("✅ Atendidas (+2 min)", int(atendidas_meu))
+    c5.metric("❌ Não atendidas", int(nao_atendidas_meu))
+    c6.metric("⚠️ Falhou", int(falhou_meu))
+    c7.metric("📶 Congestionadas", int(congestion_meu))
+    c8.metric("📊 Taxa de atendimento", f"{taxa_atendimento_meu:.1f}%")
 
-# =========================
-# GRÁFICO: EVOLUÇÃO DIÁRIA (RAMAL)
-# =========================
-st.subheader("📈 Evolução diária (números únicos por dia)")
-
-daily_me = (
-    df_meu.groupby("_dia")[COL_TELEFONE]
-    .nunique()
-    .reset_index(name="unicos_no_dia")
-    .sort_values("_dia")
-)
-daily_me["meta_diaria"] = int(meta_diaria)
-
-left, right = st.columns([2, 1])
-with left:
-    st.line_chart(daily_me.set_index("_dia")[["unicos_no_dia", "meta_diaria"]], height=260)
-with right:
-    st.dataframe(daily_me, use_container_width=True, height=260)
+st.success(f"{meu_nome} ({meu_ramal}) ligou para {meu_unicos} contatos únicos no total.")
 
 # =========================
-# RANKING: POR RAMAL
+# RANKING POR RAMAL
 # =========================
-st.subheader("🏆 Ranking por ramal (números únicos no período)")
+st.subheader("🏆 Ranking por ramal (contatos únicos)")
 
 ranking = (
     df.groupby(COL_ORIGEM)
     .agg(
-        ligacoes=(COL_TELEFONE, "size"),
-        unicos=(COL_TELEFONE, pd.Series.nunique),
+        ligacoes=("_destino_final", "size"),
+        unicos=("_destino_final", pd.Series.nunique),
     )
     .reset_index()
 )
 
 ranking["repeticoes"] = ranking["ligacoes"] - ranking["unicos"]
 ranking["Nome"] = ranking[COL_ORIGEM].astype(str).map(RAMAL_PARA_NOME).fillna("Sem nome")
-ranking = ranking[["Nome", COL_ORIGEM, "ligacoes", "unicos", "repeticoes"]]
-ranking = ranking.sort_values("unicos", ascending=False)
 
+if COL_ESTADO in df.columns:
+    atendidas_por_ramal = (
+        df.assign(_atendida_regra=((df[COL_ESTADO].astype(str).str.upper().str.strip() == "ATENDIDA") & (df[COL_DURACAO] >= 120)).astype(int))
+        .groupby(COL_ORIGEM)["_atendida_regra"]
+        .sum()
+        .reset_index(name="atendidas_2min")
+    )
+
+    ranking = ranking.merge(atendidas_por_ramal, on=COL_ORIGEM, how="left")
+    ranking["atendidas_2min"] = ranking["atendidas_2min"].fillna(0).astype(int)
+    ranking["taxa_atendimento"] = ranking.apply(
+        lambda row: (row["atendidas_2min"] / row["ligacoes"] * 100) if row["ligacoes"] > 0 else 0,
+        axis=1
+    )
+    ranking = ranking[["Nome", COL_ORIGEM, "ligacoes", "unicos", "repeticoes", "atendidas_2min", "taxa_atendimento"]]
+    ranking["taxa_atendimento"] = ranking["taxa_atendimento"].map(lambda x: f"{x:.1f}%")
+else:
+    ranking = ranking[["Nome", COL_ORIGEM, "ligacoes", "unicos", "repeticoes"]]
+
+ranking = ranking.sort_values("unicos", ascending=False)
 st.dataframe(ranking, use_container_width=True, height=320)
 
 # =========================
-# GRÁFICO: TOP 10 RAMAIS
+# CONTATOS MAIS REPETIDOS DO RAMAL
 # =========================
-st.subheader("📊 Top 10 ramais (únicos)")
-
-top10 = ranking.head(10).copy()
-top10 = top10.set_index("Nome")[["unicos"]]
-st.bar_chart(top10, height=260)
-
-# =========================
-# NÚMEROS MAIS REPETIDOS (RAMAL)
-# =========================
-st.subheader("🔁 Números mais repetidos do ramal selecionado")
+st.subheader("🔁 Contatos mais repetidos do ramal selecionado")
 
 top_rep = (
-    df_meu.groupby(COL_TELEFONE)
+    df_meu.groupby("_destino_final")
     .size()
     .reset_index(name="tentativas")
     .sort_values("tentativas", ascending=False)
 )
 
-st.dataframe(top_rep.head(200), use_container_width=True, height=320)
-st.caption("Se um número aparece com muitas tentativas, é retrabalho (ligações repetidas).")
+st.dataframe(top_rep.head(300), use_container_width=True, height=320)
 
 # =========================
-# DETALHES (opcional)
+# DADOS COMPLETOS
 # =========================
-with st.expander("🔎 Ver dados filtrados (para conferência)"):
-    st.dataframe(df, use_container_width=True, height=380)
+with st.expander("🔎 Ver dados completos (para conferência)"):
+    st.dataframe(df, use_container_width=True, height=420)
 
 # =========================
 # EXPORT
@@ -239,7 +284,7 @@ with st.expander("🔎 Ver dados filtrados (para conferência)"):
 def to_excel_bytes(df_to_save: pd.DataFrame) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_to_save.to_excel(writer, index=False, sheet_name="DADOS_FILTRADOS")
+        df_to_save.to_excel(writer, index=False, sheet_name="DADOS")
     return output.getvalue()
 
 st.subheader("📦 Exportar")
@@ -247,16 +292,16 @@ exp1, exp2 = st.columns(2)
 
 with exp1:
     st.download_button(
-        "⬇️ Baixar DADOS filtrados (Excel)",
+        "⬇️ Baixar DADOS (Excel)",
         data=to_excel_bytes(df),
-        file_name="ligacoes_filtradas.xlsx",
+        file_name="ligacoes_todos_os_registros.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
 
 with exp2:
     st.download_button(
-        "⬇️ Baixar RANKING por ramal (CSV)",
+        "⬇️ Baixar RANKING (CSV)",
         data=ranking.to_csv(index=False).encode("utf-8-sig"),
         file_name="ranking_ramais.csv",
         mime="text/csv",

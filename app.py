@@ -238,7 +238,7 @@ ranking["Nome"] = ranking[COL_ORIGEM].astype(str).map(RAMAL_PARA_NOME).fillna("S
 
 if COL_ESTADO in df.columns:
     atendidas_por_ramal = (
-        df.assign(_atendida_regra=((df[COL_ESTADO].astype(str).str.upper().str.strip() == "ATENDIDA") & (df[COL_DURACAO] >= 120)).astype(int))
+        df.assign(_atendida_regra=((df[COL_ESTADO].astype(str).str.upper().str.strip() == "ATENDIDA") & (df[COL_DURACAO] >= 60)).astype(int))
         .groupby(COL_ORIGEM)["_atendida_regra"]
         .sum()
         .reset_index(name="atendidas_2min")
